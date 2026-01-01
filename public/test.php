@@ -6,7 +6,7 @@ echo "Testing Database Connection...\n\n";
 try {
     // Load config
     $config = [
-        'host' => getenv('DB_HOST') ?: 'mysql.railway.internal',
+        'host' => getenv('DB_HOST') ?: 'caboose.proxy.rlwy.net',
         'port' => getenv('DB_PORT') ?: '3306',
         'dbname' => getenv('DB_NAME'),
         'user' => getenv('DB_USER'),
