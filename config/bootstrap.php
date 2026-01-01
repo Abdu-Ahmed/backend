@@ -1,145 +1,150 @@
 <?php
-// config/bootstrap.php
 
-// Composer autoloader
-require __DIR__ . '/../vendor/autoload.php';
+declare(strict_types=1);
 
-// Define BASE_PATH constant if not set
+/**
+ * Application bootstrap
+ *
+ * - Loads environment variables when a .env file exists (non-fatal when missing).
+ * - Provides env() helper.
+ * - Sets error reporting based on APP_ENV / DEBUG.
+ * - Adds exception and shutdown handlers that log and, in dev, return detailed JSON.
+ */
+
+// Define base path early so other helpers can use it
 if (!defined('BASE_PATH')) {
-    define('BASE_PATH', realpath(__DIR__ . '/..') . DIRECTORY_SEPARATOR);
+    define('BASE_PATH', __DIR__ . '/../');
 }
 
 /**
- * Helper to read environment variables from getenv() or $_ENV (Railway supplies env vars)
+ * Ensure we have a function to resolve full paths.
  */
-function env(string $key, $default = null) {
-    $val = getenv($key);
-    if ($val === false) {
-        // fallback to $_ENV if getenv returned false
+if (!function_exists('base_path')) {
+    function base_path(string $path = ''): string
+    {
+        $p = rtrim(BASE_PATH, '/\\') . '/';
+        return $p . ltrim($path, '/\\');
+    }
+}
+
+/**
+ * Safe dotenv load:
+ * - If a .env file exists in the project root, load it.
+ * - If it does not exist, skip loading (we expect real env vars to come from Railway).
+ */
+try {
+    // Only attempt to load if .env exists
+    $envFile = base_path('.env');
+    if (file_exists($envFile) && is_readable($envFile)) {
+        $dotenv = Dotenv\Dotenv::createImmutable(base_path());
+        $dotenv->load();
+    }
+} catch (\Dotenv\Exception\InvalidPathException $e) {
+    // No .env found — harmless on Railway; continue
+} catch (\Throwable $e) {
+    // Unexpected error while loading dotenv — rethrow so our handler will show it
+    throw $e;
+}
+
+/**
+ * env helper: checks $_ENV, $_SERVER, and getenv()
+ */
+if (!function_exists('env')) {
+    function env(string $key, $default = null)
+    {
         if (array_key_exists($key, $_ENV)) {
             return $_ENV[$key];
         }
-        return $default;
+        if (array_key_exists($key, $_SERVER)) {
+            return $_SERVER[$key];
+        }
+        $v = getenv($key);
+        return $v === false ? $default : $v;
     }
-    return $val;
 }
 
 /**
- * Attempt to load .env using vlucas/phpdotenv only if a .env file exists.
- * This prevents an InvalidPathException on platforms (like Railway) where env
- * vars are set in the environment and no .env file is present.
+ * Development flags and error reporting
  */
-$envPath = __DIR__ . '/..';
-$envFile = $envPath . '/.env';
-if (file_exists($envFile) && is_readable($envFile)) {
-    try {
-        $dotenv = Dotenv\Dotenv::createImmutable($envPath);
-        $dotenv->load();
-    } catch (Throwable $e) {
-        // If dotenv fails for any reason, log and continue — environment may still be provided
-        error_log("Dotenv load warning: " . $e->getMessage());
-    }
-}
+$appEnv = (string) (env('APP_ENV', env('ENV', 'production')) ?? 'production');
+$debug = filter_var(env('DEBUG', ($appEnv === 'development' ? '1' : '0')), FILTER_VALIDATE_BOOLEAN);
 
-// Determine debug mode from env `APP_DEBUG` (accepts "1", "true", "on")
-$appDebug = strtolower((string) (env('APP_DEBUG', '0'))) === '1' ||
-            strtolower((string) (env('APP_DEBUG', '0'))) === 'true' ||
-            strtolower((string) (env('APP_ENV', ''))) === 'development';
-
-// Configure PHP error reporting and display depending on debug mode
-error_reporting(E_ALL);
-if ($appDebug) {
+// Configure error display/logging
+if ($debug) {
     ini_set('display_errors', '1');
     ini_set('display_startup_errors', '1');
+    error_reporting(E_ALL);
 } else {
     ini_set('display_errors', '0');
     ini_set('display_startup_errors', '0');
-}
-
-// Set a friendly timezone if not already set (optional)
-if (!ini_get('date.timezone')) {
-    date_default_timezone_set('UTC');
+    error_reporting(E_ALL);
+    ini_set('log_errors', '1');
+    // Put logs inside storage/logs (create if missing)
+    $logDir = base_path('storage/logs');
+    if (!is_dir($logDir)) {
+        @mkdir($logDir, 0775, true);
+    }
+    ini_set('error_log', $logDir . '/php-error.log');
 }
 
 /**
- * Error and exception handlers: in debug mode return/echo detailed info;
- * in production log to error_log() (captured by Railway logs) and keep responses minimal.
+ * Global exception handler: logs full trace and returns JSON on API requests.
  */
-set_error_handler(function ($errno, $errstr, $errfile, $errline) use ($appDebug) {
-    $msg = sprintf("PHP ERROR [%d] %s in %s on line %d", $errno, $errstr, $errfile, $errline);
-    if ($appDebug) {
-        // display and log
-        header('Content-Type: text/plain', true, 500);
-        echo $msg . PHP_EOL . PHP_EOL;
-        debug_print_backtrace();
-    } else {
-        error_log($msg);
-        // don't reveal internals to clients
-        header('Content-Type: application/json', true, 500);
-        echo json_encode(['error' => 'Internal Server Error']);
-    }
-    exit(1);
-});
+set_exception_handler(function (\Throwable $e) use ($debug) {
+    // Always log full error and trace
+    error_log("Uncaught Exception: " . $e->getMessage() . "\n" . $e->getTraceAsString());
 
-set_exception_handler(function ($e) use ($appDebug) {
-    $msg = sprintf("Uncaught Exception: %s in %s on line %d\nStack trace:\n%s",
-                   $e->getMessage(), $e->getFile(), $e->getLine(), $e->getTraceAsString());
-    if ($appDebug) {
-        header('Content-Type: text/plain', true, 500);
-        echo $msg;
-    } else {
-        error_log($msg);
-        header('Content-Type: application/json', true, 500);
-        echo json_encode(['error' => 'Internal Server Error']);
-    }
-    exit(1);
-});
+    // Decide response format: JSON if request likely expecting JSON, otherwise plain text
+    $accept = $_SERVER['HTTP_ACCEPT'] ?? '';
+    $isJsonRequest = stripos($accept, 'application/json') !== false
+                     || (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest');
 
-// Catch fatal errors on shutdown
-register_shutdown_function(function () use ($appDebug) {
-    $err = error_get_last();
-    if ($err !== null && in_array($err['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR])) {
-        $msg = sprintf("Fatal error: %s in %s on line %d", $err['message'], $err['file'], $err['line']);
-        if ($appDebug) {
-            header('Content-Type: text/plain', true, 500);
-            echo $msg;
+    http_response_code(500);
+    if ($isJsonRequest || php_sapi_name() !== 'cli') {
+        header('Content-Type: application/json');
+        if ($debug) {
+            echo json_encode([
+                'error' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+                'trace' => $e->getTrace()
+            ], JSON_PRETTY_PRINT);
         } else {
-            error_log($msg);
-            header('Content-Type: application/json', true, 500);
-            echo json_encode(['error' => 'Internal Server Error']);
+            echo json_encode(['error' => 'Server misconfiguration']);
+        }
+    } else {
+        // CLI or plain text
+        if ($debug) {
+            echo "Uncaught Exception: " . $e->getMessage() . "\n\n" . $e->getTraceAsString();
+        } else {
+            echo "Server misconfiguration\n";
+        }
+    }
+    exit(1);
+});
+
+/**
+ * Shutdown handler to catch fatal errors (parse/compile/fatal)
+ */
+register_shutdown_function(function () use ($debug) {
+    $err = error_get_last();
+    if ($err && in_array($err['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+        $message = sprintf("Fatal error: %s in %s on line %d", $err['message'], $err['file'], $err['line']);
+        error_log($message);
+        if ($debug) {
+            header('Content-Type: application/json');
+            http_response_code(500);
+            echo json_encode(['error' => $message, 'error_details' => $err], JSON_PRETTY_PRINT);
+        } else {
+            header('Content-Type: application/json');
+            http_response_code(500);
+            echo json_encode(['error' => 'Server misconfiguration']);
         }
     }
 });
 
 /**
- * Validate required environment variables (lookups use env() above so Railway vars work).
- * If a required variable is missing, show detailed message in debug; otherwise log & abort.
- */
-$required_vars = ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER'];
-$missing = [];
-foreach ($required_vars as $var) {
-    $value = env($var);
-    if ($value === null || $value === false || $value === '') {
-        $missing[] = $var;
-    }
-}
-if (!empty($missing)) {
-    $msg = "Required environment variable(s) missing: " . implode(', ', $missing);
-    if ($appDebug) {
-        // throw an exception so it shows full trace (debug mode)
-        throw new RuntimeException($msg);
-    } else {
-        error_log($msg);
-        // graceful JSON response for API clients
-        http_response_code(500);
-        header('Content-Type: application/json');
-        echo json_encode(['error' => 'Server misconfiguration']);
-        exit(1);
-    }
-}
-
-/**
- * Convenience helpers (unchanged semantics from your previous file).
+ * Helpers: dd() and abort()
  */
 if (!function_exists('dd')) {
     function dd($value)
@@ -147,23 +152,42 @@ if (!function_exists('dd')) {
         echo '<pre>';
         var_dump($value);
         echo '</pre>';
-        die();
-    }
-}
-
-if (!function_exists('base_path')) {
-    function base_path($path = '')
-    {
-        return BASE_PATH . ltrim($path, '/\\');
+        exit;
     }
 }
 
 if (!function_exists('abort')) {
-    function abort($code = 404, $message = 'Resource not found')
+    function abort(int $code = 404, string $message = 'Resource not found')
     {
         http_response_code($code);
         header('Content-Type: application/json');
         echo json_encode(['error' => $message]);
-        die();
+        exit;
+    }
+}
+
+/**
+ * Validate required environment variables (fail early with helpful message in dev)
+ */
+$requiredVars = ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER'];
+$missing = [];
+foreach ($requiredVars as $v) {
+    if (env($v) === null || env($v) === '') {
+        $missing[] = $v;
+    }
+}
+if (!empty($missing)) {
+    $msg = 'Missing required environment variables: ' . implode(', ', $missing);
+    if ($debug) {
+        // Throw so our exception handler returns a full trace
+        throw new RuntimeException($msg);
+    } else {
+        // Log and abort with generic message in production
+        error_log($msg);
+        // Send 500 JSON response and terminate
+        http_response_code(500);
+        header('Content-Type: application/json');
+        echo json_encode(['error' => 'Server misconfiguration']);
+        exit;
     }
 }
