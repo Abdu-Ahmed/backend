@@ -6,11 +6,11 @@ echo "Testing Database Connection...\n\n";
 try {
     // Load config
     $config = [
-        'host' => getenv('MYSQLHOST') ?: 'mysql.railway.internal',
-        'port' => getenv('MYSQLPORT') ?: '3306',
-        'dbname' => getenv('MYSQLDATABASE'),
-        'user' => getenv('MYSQLUSER'),
-        'password' => getenv('MYSQLPASSWORD'),
+        'host' => getenv('DB_HOST') ?: 'mysql.railway.internal',
+        'port' => getenv('DB_PORT') ?: '3306',
+        'dbname' => getenv('DB_NAME'),
+        'user' => getenv('DB_USER'),
+        'password' => getenv('DB_PASSWORD'),
     ];
     
     echo "Config:\n";
