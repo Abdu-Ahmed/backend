@@ -44,24 +44,30 @@ public static function getInstance(): PDO
             // Load database configuration
             $config = include __DIR__ . '/../../config/db.php';
 
-            // Log configuration details
-            error_log("Attempting database connection with following config:");
+            // Log ALL configuration details (except password)
+            error_log("=== DATABASE CONNECTION ATTEMPT ===");
             error_log("Host: " . $config['host']);
+            error_log("Port: " . $config['port']);
             error_log("DB Name: " . $config['dbname']);
             error_log("User: " . $config['user']);
-            error_log("Port: " . $config['port']);
+            error_log("Password set: " . (!empty($config['password']) ? 'YES' : 'NO'));
+            
+            // Also check environment variables directly
+            error_log("Env MYSQLHOST: " . getenv('MYSQLHOST'));
+            error_log("Env MYSQLPORT: " . getenv('MYSQLPORT'));
+            error_log("Env MYSQLDATABASE: " . getenv('MYSQLDATABASE'));
+            error_log("Env MYSQLUSER: " . getenv('MYSQLUSER'));
 
-            // Use the host from config, NOT hardcoded 127.0.0.1
             $dsn = sprintf(
                 "mysql:host=%s;port=%s;dbname=%s;charset=utf8mb4",
-                $config['host'],  // ← Changed from '127.0.0.1' to $config['host']
+                $config['host'],
                 $config['port'],
                 $config['dbname']
             );
 
-            error_log("DSN: " . $dsn);
+            error_log("Full DSN: " . $dsn);
 
-            // Create the PDO instance with error and fetch mode options
+            // Try with connection timeout
             self::$instance = new PDO(
                 $dsn,
                 $config['user'],
@@ -69,20 +75,21 @@ public static function getInstance(): PDO
                 [
                     PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                    PDO::ATTR_PERSISTENT => false, // Important for Railway
-                    PDO::MYSQL_ATTR_SSL_CA => getenv('MYSQL_SSL_CA_PATH') ?: null,
+                    PDO::ATTR_TIMEOUT => 5, // 5 second timeout
                     PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4"
                 ]
             );
 
-            error_log("Database connection successful");
+            error_log("✓ Database connection successful");
+            
         } catch (PDOException $e) {
-            error_log("Connection failed: " . $e->getMessage());
+            error_log("✗ Connection failed: " . $e->getMessage());
+            error_log("Error Code: " . $e->getCode());
+            error_log("Full Error: " . print_r($e, true));
+            
             throw new RuntimeException(
-                "Connection failed: " . $e->getMessage() .
-                "\nDSN: " . ($dsn ?? 'N/A') .
-                "\nUser: " . $config['user'] .
-                "\nHost: " . $config['host']
+                "Database connection failed: " . $e->getMessage() . 
+                "\nCheck Railway logs for more details."
             );
         }
     }
