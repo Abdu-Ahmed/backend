@@ -7,7 +7,7 @@ try {
     // Load config
     $config = [
         'host' => getenv('DB_HOST') ?: 'caboose.proxy.rlwy.net',
-        'port' => getenv('DB_PORT') ?: '3306',
+        'port' => getenv('DB_PORT') ?: '20209',
         'dbname' => getenv('DB_NAME'),
         'user' => getenv('DB_USER'),
         'password' => getenv('DB_PASSWORD'),
